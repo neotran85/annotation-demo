@@ -1,51 +1,101 @@
-# Copyright (c) Streamlit Inc. (2018-2022) Snowflake Inc. (2022)
-#
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
-#
-#     http://www.apache.org/licenses/LICENSE-2.0
-#
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
-
 import streamlit as st
-from streamlit.logger import get_logger
+import cv2
+import tempfile
+import torch
+import os
+from PIL import Image
+import numpy as np
 
-LOGGER = get_logger(__name__)
+# Check if CUDA is available and set the device to GPU
+device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+# Load YOLOv5 model onto the device
+model = torch.hub.load('ultralytics/yolov5', 'yolov5s', pretrained=True).to(device)
 
+st.title("AI-powered Image and Video Annotator")
 
-def run():
-    st.set_page_config(
-        page_title="Hello",
-        page_icon="👋",
-    )
+if torch.cuda.is_available():
+    st.write("CUDA is available. Using GPU for inference.")
+else:
+    st.write("CUDA is not available. Using CPU for inference.")
 
-    st.write("# Welcome to Streamlit! 👋")
+uploaded_file = st.file_uploader("Please upload an image or MP4 video (shorter than 30 seconds):", type=["mp4", "jpg", "jpeg", "png"])
 
-    st.sidebar.success("Select a demo above.")
+if uploaded_file is not None:
+    # Process image
+    if uploaded_file.type in ["image/jpeg", "image/png"]:
+        with st.spinner('Analyzing the image...'):
+            # Read the image into memory
+            bytes_data = uploaded_file.getvalue()
+            image = Image.open(uploaded_file)
+            image = np.array(image)  # Convert to numpy array
 
-    st.markdown(
-        """
-        Streamlit is an open-source app framework built specifically for
-        Machine Learning and Data Science projects.
-        **👈 Select a demo from the sidebar** to see some examples
-        of what Streamlit can do!
-        ### Want to learn more?
-        - Check out [streamlit.io](https://streamlit.io)
-        - Jump into our [documentation](https://docs.streamlit.io)
-        - Ask a question in our [community
-          forums](https://discuss.streamlit.io)
-        ### See more complex demos
-        - Use a neural net to [analyze the Udacity Self-driving Car Image
-          Dataset](https://github.com/streamlit/demo-self-driving)
-        - Explore a [New York City rideshare dataset](https://github.com/streamlit/demo-uber-nyc-pickups)
-    """
-    )
+            # Ensure that image is RGB (3 channels)
+            if image.ndim == 2 or (image.ndim == 3 and image.shape[2] == 1):
+                image = cv2.cvtColor(image, cv2.COLOR_GRAY2BGR)
+            elif image.ndim == 3 and image.shape[2] > 3:
+                image = image[:, :, :3]
 
+            # Inference
+            results = model(image)
 
-if __name__ == "__main__":
-    run()
+            # Render the results
+            rendered_data = results.render()
+            annotated_image = rendered_data[0]  # Take the first annotated image
+
+            # Convert the annotated image to PIL format to display in Streamlit
+            annotated_image_pil = Image.fromarray(annotated_image)
+            st.image(annotated_image_pil, caption='Annotated Image', use_column_width=True)
+
+    # Process video
+    elif uploaded_file.type == "video/mp4":
+        with st.spinner('Analyzing the video...'):
+            tfile = tempfile.NamedTemporaryFile(delete=False) 
+            tfile.write(uploaded_file.read())
+            tfile.flush()
+            # Open the video file
+            cap = cv2.VideoCapture(tfile.name)
+
+            # Delete the original temp file to free up space
+            os.unlink(tfile.name)
+
+            # Create a named temporary file for the output
+            temp_out_file = tempfile.NamedTemporaryFile(delete=False, suffix='.mp4')
+            frame_width = int(cap.get(3))
+            frame_height = int(cap.get(4))
+
+            # Define the codec and create VideoWriter object
+            fourcc = cv2.VideoWriter_fourcc(*'mp4v')
+            out = cv2.VideoWriter(temp_out_file.name, fourcc, 20.0, (frame_width, frame_height))
+
+            try:
+                while cap.isOpened():
+                    ret, frame = cap.read()
+                    if not ret:
+                        break
+                    # Convert frame to format required by model
+                    results = model(frame)
+                    # Draw the results on the frame
+                    annotated_frame = results.render()[0]
+                    # Write frame to output video
+                    out.write(annotated_frame)
+
+                cap.release()
+                out.release()
+
+                # Get the path of the temporary output file
+                temp_out_file_path = temp_out_file.name
+                # Read the video file in binary mode
+                with open(temp_out_file_path, 'rb') as f:
+                    video_bytes = f.read()
+
+                # Display the video with Streamlit video component
+                st.write("Please click the play button to watch the result video below:")
+                st.video(video_bytes)
+
+            except Exception as e:
+                st.error('Error: %s' % e)
+            finally:
+                # Close the temporary files
+                temp_out_file.close()
+                # Delete the temporary file
+                os.unlink(temp_out_file.name)
